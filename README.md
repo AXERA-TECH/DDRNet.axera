@@ -55,11 +55,10 @@ python tools/make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
 
 默认输出并归档到 `../dataset/cityscapes/ddrnet_calib_<H>x<W>[-resize]-img|bin`
 （`--img-dir` 按实际图像目录指定，脚本默认 `../dataset/cityscapes/val`）。
-已生成的校准集：
 
-| 校准集（`../dataset/cityscapes/`） | 内容 | 用途 |
-| --- | --- | --- |
-| `ddrnet_calib_1024x2048-resize-img(.tar)` | 500 x PNG，仅 resize（BGR 0-255） | 当前 `config_u8/u16_ptq-preprocess.json`（Image 校准，归一化在板上完成） |
+已生成的校准集为 `../dataset/cityscapes/ddrnet_calib_1024x2048-resize-img(.tar)`：
+500 张仅 resize 的 PNG（BGR 0-255），供当前 `config_u8/u16_ptq-preprocess.json`
+使用（Image 校准，mean/std 归一化在板上 `input_processors` 完成）。
 
 ## 3. 模型转换
 
