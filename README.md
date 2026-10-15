@@ -3,7 +3,167 @@
 将 DDRNet（DDRNet-23 / DDRNet-23-slim，Cityscapes 19 类）从 ONNX 经
 Pulsar2 量化编译为 `compiled.axmodel`，并在 AX650A 上完成全量 val 精度验证。
 
-## 1. 参考项目
+## 1. 模型精度对比
+
+Cityscapes val 全量 500 张，19 类，ignore_index=255；指标为官方口径的
+mIoU / aAcc。
+
+| 模型 | 精度模式 | mIoU | aAcc | ΔmIoU（量化 vs 浮点） | 平均推理耗时（ms） |
+| --- | --- | --- | --- | --- | --- |
+| DDRNet-23 | FP32 ONNX | 79.99 | 96.36 | / | / |
+| DDRNet-23 | [W8A8](./config/config_u8_ptq-preprocess.json) | 78.76 | 96.09 | -1.23 | / |
+| DDRNet-23 | [W8A16](./config/config_u16_ptq-preprocess.json) | 79.95 | 96.35 | -0.04 | / |
+| DDRNet-23-slim | FP32 ONNX | 77.97 | 95.98 | / | / |
+| DDRNet-23-slim | [W8A8](./config/config_u8_ptq-preprocess.json) | 77.79 | 95.92 | -0.18 | / |
+
+## 2. 校准集准备
+
+1）数据下载（Cityscapes 官方 zip 的 HuggingFace 镜像）：
+
+```bash
+mkdir -p ../dataset/cityscapes && cd ../dataset/cityscapes
+
+# 来源：HuggingFace 镜像 mkhan91/Cityscapes（官方原始 zip，支持断点续传）
+curl -sL -C - -o gtFine_trainvaltest.zip \
+  "https://huggingface.co/datasets/mkhan91/Cityscapes/resolve/main/gtFine_trainvaltest.zip"
+curl -sL -C - -o leftImg8bit.zip \
+  "https://huggingface.co/datasets/mkhan91/Cityscapes/resolve/main/leftImg8bit.zip"
+
+# 校验并解压（leftImg8bit 约 11.6GB，gtFine 约 241MB）
+unzip -tq gtFine_trainvaltest.zip && unzip -tq leftImg8bit.zip
+unzip -q gtFine_trainvaltest.zip && unzip -q leftImg8bit.zip
+```
+
+解压后得到 `leftImg8bit/{train,val,test}` 与 `gtFine/{train,val,test}`；
+本校准集使用 `leftImg8bit/val` 500 张。（路径按本包部署布局
+`../dataset/cityscapes` 书写；本机上本包嵌套在 `DDRNet/` 下，实际数据在
+`../../dataset/cityscapes`，以下命令同理调整。）
+
+2）生成校准集：
+
+- 数据源：Cityscapes val 500 张（frankfurt / lindau / munster），
+  部署布局下位于 `../dataset/cityscapes/leftImg8bit/val`。
+- 工具：本包 `make_calib.py`（自含预处理，不依赖其他脚本，仅需
+  `opencv-python` + `numpy`），完成后自动归档为**扁平 tar**
+  （条目 `./<stem>.png|bin`）。
+
+```bash
+# Image 校准（当前 U8/U16 配置实际使用）：resize 至 1024x2048 的 PNG
+python make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
+    --input-size 1024 2048 --save-images
+
+# 辅助模式：仅 resize 的 float32 bin（BGR，0-255，[1,3,1024,2048]）
+python make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
+    --input-size 1024 2048 --resize-only
+```
+
+默认输出并归档到 `../dataset/cityscapes/ddrnet_calib_<H>x<W>[-resize]-img|bin`
+（`--img-dir` 按实际图像目录指定，脚本默认 `../dataset/cityscapes/val`）。
+已生成的校准集：
+
+| 校准集（`../dataset/cityscapes/`） | 内容 | 用途 |
+| --- | --- | --- |
+| `ddrnet_calib_1024x2048-resize-img(.tar)` | 500 x PNG，仅 resize（BGR 0-255） | 当前 `config_u8/u16_ptq-preprocess.json`（Image 校准，归一化在板上完成） |
+| `ddrnet_calib_1024x2048-bin(.tar)` | 500 x float32 [1,3,1024,2048]，已归一化（RGB） | 早期 slim 初版（Binary 校准） |
+| `ddrnet_calib_1024x1024-bin(.tar)` | 500 x float32 [1,3,1024,1024]，已归一化 | 1024x1024 输入模型备用 |
+
+配置中 `calibration_size: 32`，即从 tar 中取前 32 张参与量化校准。
+
+## 3. 模型转换
+
+工具链：Pulsar2 v7.0（Docker 内运行），目标平台 **AX650A**，NPU3 模式。
+
+```bash
+# 在 Pulsar2 环境中、以本包目录为工作目录执行
+pulsar2 build --config config/config_u8_ptq-preprocess.json    # U8
+pulsar2 build --config config/config_u16_ptq-preprocess.json   # U16
+```
+
+本包两个量化配置的差异仅在整网数据类型：
+
+| 配置项 | `config_u8_ptq-preprocess.json` | `config_u16_ptq-preprocess.json` |
+| --- | --- | --- |
+| input | `onnx/ddrnet23_cityscapes-2048x1024.onnx` | 同左 |
+| 整网数据类型 | U8 | U16 |
+| 校准数据 | `../dataset/cityscapes/ddrnet_calib_1024x2048-resize-img.tar`（Image，size 32） | 同左 |
+| 校准 mean/std | ImageNet RGB [123.675, 116.28, 103.53] / [58.395, 57.12, 57.375] | 同左 |
+| 输入端处理 | BGR/NHWC/U8 → RGB/NCHW + mean/std | 同左 |
+| conv bias / 精度分析 | FP32 / EndToEnd + NPUBackend | 同左 |
+| output_dir | `output_ddrnet23-ptq-preprocess-npu3` | `output_ddrnet23-ptq-u16-preprocess-npu3` |
+
+构建产出（每个 `output_*` 目录）：
+
+- `compiled.axmodel` — 部署产物（内嵌输入预处理，可直接送给 axengine）
+- `frontend/optimized.onnx` — 前端优化图
+- `quant/quant_axmodel.onnx`（+ `.data/.json`）— 量化图
+- `quant/debug/precision_analysis_table.txt` — 逐层量化精度表（Cosine/MSE），
+  如末端输出层 U16 版 Cosine 0.99985 / MSE 0.00129，
+  U8 版 0.98427 / 0.13061
+
+编译产物可按平台归档到 `axmodel/AX650/`、`axmodel/AX637/`。
+转换历史（输出目录位于项目根目录 `DDRNet/`）：
+
+| 输出目录 | 模型 / 校准 | npu_mode | 说明 |
+| --- | --- | --- | --- |
+| `output_ddrnet23-slim-ptq` | slim / Binary（预归一化 bin） | NPU1 | 初版，`compiler.check=2` |
+| `output_ddrnet23-slim-ptq-preprocess` | slim / Image | NPU1 | 归一化移至板上 `input_processors` |
+| `output_ddrnet23-slim-ptq-preprocess-npu3` | slim / Image | NPU3 | slim 最终版（精度见第 1 节） |
+| `output_ddrnet23-ptq-preprocess-npu3` | DDRNet-23 / Image | NPU3 | 对应 `config_u8_ptq-preprocess.json` |
+| `output_ddrnet23-ptq-u16-preprocess-npu3` | DDRNet-23 / Image | NPU3 | 对应 `config_u16_ptq-preprocess.json` |
+
+## 4. 精度验证
+
+流程：GT 转换 → ONNX FP32 评估 → axmodel 评估（数据下载见第 2 节）。
+
+1）GT 转换（labelIds → labelTrainIds）：镜像包不含
+`*_gtFine_labelTrainIds.png`，需转换后才能算官方指标：
+
+```bash
+# 从 polygons 栅格化（边界像素更严格；需在 mmsegmentation 工程根目录执行，
+# 并 pip install cityscapesscripts）
+python tools/dataset_converters/cityscapes.py ../dataset/cityscapes --nproc 32
+```
+
+校验：`leftImg8bit/val` 500 张图，`gtFine/val` 500 个
+`*_gtFine_labelTrainIds.png`。评估时 `--img-dir` 指向图像目录
+（下载布局为 `leftImg8bit/val`，本机现有数据为 `val/`）、`--gt-dir` 指向
+`gtFine/val`。
+
+2）ONNX FP32 评估 `eval_onnx.py`（依赖 onnxruntime）：
+
+```bash
+# 快速抽查（默认前 5 张，输出 onnx-vis/）
+python eval_onnx.py
+
+# 全量 val + GT 指标
+python eval_onnx.py \
+    --model onnx/ddrnet23_cityscapes-2048x1024.onnx \
+    --img-dir ../dataset/cityscapes/leftImg8bit/val \
+    --gt-dir ../dataset/cityscapes/gtFine/val \
+    --limit 0 --device cpu
+```
+
+3）axmodel 评估 `eval_axera.py`（依赖 axengine，`AxEngineExecutionProvider`）：
+
+```bash
+# 默认：U16 量化模型，全量 500 张，输出 axera_pred-u16/
+python eval_axera.py
+
+# 指定其他 axmodel（如 U8 / slim）
+python eval_axera.py \
+    --model output_ddrnet23-ptq-preprocess-npu3/compiled.axmodel \
+    --out-dir axera_pred --gt-dir ../dataset/cityscapes/gtFine/val
+```
+
+- 该脚本只做 resize + BGR→RGB，输入 **U8 NHWC**；mean/std 归一化由
+  axmodel 内嵌 `input_processors` 自动完成，与量化的预处理保持一致。
+- 输出：`<out-dir>/pred/<city>/*_pred.png`、`meta.json`（含平均耗时），
+  有 GT 时另有 `metrics.json/csv`。
+
+指标为 19 类 IoU/Acc、mIoU、aAcc（ignore_index=255），与官方 Cityscapes
+评测口径一致。
+
+## 5. 参考项目
 
 - **DDRNet**（TPAMI 2023）: *Deep Dual-Resolution Networks for Real-Time
   and Accurate Semantic Segmentation of Traffic Scenes*
@@ -13,178 +173,3 @@ Pulsar2 量化编译为 `compiled.axmodel`，并在 AX650A 上完成全量 val �
   - <https://github.com/open-mmlab/mmsegmentation>（`configs/ddrnet`）
 - **AXERA Pulsar2** v7.0 量化编译工具链 + **axengine** 运行时（AX650A）
   - <https://pulsar2-docs.readthedocs.io/en/latest/pulsar2/introduction.html>
-
-## 2. 模型（`onnx/`）
-
-| 文件 | 网络 | 参数量 | 输入 (NCHW) | 大小 |
-| --- | --- | --- | --- | --- |
-| `ddrnet23_cityscapes-2048x1024.onnx` | DDRNet-23 | 20.15M | 1x3x**1024x2048** | 80.6 MB |
-| `ddrnet23-slim_cityscapes-2048x1024.onnx` | DDRNet-23-slim | 5.70M | 1x3x**1024x2048** | 22.9 MB |
-| `ddrnet23_cityscapes-1024x1024.onnx` | DDRNet-23 | 20.15M | 1x3x1024x1024 | 80.6 MB |
-| `ddrnet23-slim_cityscapes-1024x1024.onnx` | DDRNet-23-slim | 5.70M | 1x3x1024x1024 | 22.9 MB |
-
-- 文件名中的 `WxH` 表示图像宽高；张量一律为 NCHW，**官方输入为
-  1x3x1024x2048**（本文档默认使用该尺寸）。
-- 输入约定：FP32、**RGB**、按 `(x - mean) / std` 归一化，图内不含归一化
-  节点；mean/std 为 ImageNet（RGB）：
-  - mean = [123.675, 116.28, 103.53]
-  - std  = [58.395, 57.12, 57.375]
-- 量化部署使用 **DDRNet-23-slim**（`ddrnet23_cityscapes-2048x1024.onnx`
-  仅用于 ONNX 侧功能核对/对比）。
-
-## 3. 校准数据集准备（`ddrnet_make_calib.py`）
-
-数据源：`../dataset/cityscapes/val`（500 张，frankfurt / lindau / munster）。
-预处理与 `ddrnet_onnx_eval.py:preprocess` 一致：`cv2.resize`（INTER_LINEAR
-到目标 H W）→ BGR→RGB → `(x - mean) / std`。所有产物归档为**扁平 tar**
-（条目 `./<stem>.bin|png`），保存在 `../dataset/cityscapes/`。
-
-```bash
-cd DDRNet
-
-# 1) 已归一化 float32 bin（[1,3,1024,1024]，值域约 [-2.1, 2.6]）
-python ddrnet_make_calib.py
-
-# 2) 已归一化 float32 bin（[1,3,1024,2048]，值域约 [-2.1, 2.6]）
-python ddrnet_make_calib.py --input-size 1024 2048
-
-# 3) 仅 resize 的 PNG（1024x2048，BGR，0-255），供 Image 校准
-python ddrnet_make_calib.py --input-size 1024 2048 --save-images
-
-# 4) 仅 resize 的 float32 bin（0-255），辅助模式
-python ddrnet_make_calib.py --input-size 1024 2048 --resize-only
-```
-
-已生成的校准集：
-
-| 产物（`../dataset/cityscapes/`） | 内容 | 用途 |
-| --- | --- | --- |
-| `ddrnet_calib_1024x1024-bin(.tar)` | 500 x float32 [1,3,1024,1024]，已归一化 | 1024x1024 模型的 Binary 校准 |
-| `ddrnet_calib_1024x2048-bin(.tar)` | 500 x float32 [1,3,1024,2048]，已归一化 | `config_siluInU8_ptq.json`（Binary 校准） |
-| `ddrnet_calib_1024x2048-resize-img(.tar)` | 500 x PNG，仅 resize | `config_siluInU8_ptq-preprocess.json`（Image 校准，归一化在板上完成） |
-
-说明：`calibration_size: 32` 时 pulsar2 只从 tar 中取前 32 张；脚本生成时
-已内嵌首张数值一致性自检（对 `preprocess` 输出 `assert_allclose` / 图像逐
-位比对）。
-
-## 4. 模型转换（配置与方法）
-
-工具链：Pulsar2 v7.0（Docker 内运行），目标平台 **AX650A**；最终构建使用
-NPU3 模式（`npu_mode: "NPU3"`）。
-
-```bash
-cd DDRNet
-pulsar2 build --config config/config_siluInU8_ptq-preprocess.json
-```
-
-量化配置（`config/`）：
-
-| 配置项 | `config_siluInU8_ptq.json` | `config_siluInU8_ptq-preprocess.json` |
-| --- | --- | --- |
-| input | `onnx/ddrnet23-slim_cityscapes-2048x1024.onnx` | 同左 |
-| 校准数据 | `ddrnet_calib_1024x2048-bin.tar`（Binary） | `ddrnet_calib_1024x2048-resize-img.tar`（Image） |
-| 校准 mean/std | 0 / 1（数据已归一化） | ImageNet RGB mean/std |
-| 输入端处理 | 无（NCHW/FP32） | `src_format: BGR, src_layout: NHWC, src_dtype: U8` → `RGB/NCHW` + mean/std |
-| Silu 精度 | U8 | U8 |
-| conv bias | FP32 | FP32 |
-| 精度分析 | EndToEnd / NPUBackend | 同左 |
-| `compiler.check` | 2 | 0 |
-| `npu_mode` | NPU3（当前文件） | NPU3 |
-| output_dir | `output_ddrnet23-slim-ptq` | `output_ddrnet23-slim-ptq-preprocess-npu3` |
-
-> `config_siluInU8_ptq.json` 为初版配置，当前文件已改为 NPU3；对应初版
-> 构建（见下表）当时使用的是 NPU1。
-
-> `config/config_siluInU16_ptq.json` 为 RTMDet（U16/S16 + smooth_quant）
-> 参考模板，与 DDRNet 无关。
-
-构建产出（每个 `output_*` 目录）：
-
-- `compiled.axmodel` — 部署产物（含嵌入式输入预处理）
-- `frontend/optimized.onnx` — 前端优化图
-- `quant/quant_axmodel.onnx`（+ `.data/.json`）— 量化图
-- `quant/dataset/input`、`quant/debug/precision_analysis_table.txt` —
-  校准样本与逐层量化精度表（Cosine / MSE）
-
-三次构建记录：
-
-| 输出目录 | 校准方式 | npu_mode | toolchain | 说明 |
-| --- | --- | --- | --- | --- |
-| `output_ddrnet23-slim-ptq` | Binary（预归一化 bin） | NPU1 | v7.0 (`00a4a752`) | 初版，`compiler.check=2` |
-| `output_ddrnet23-slim-ptq-preprocess` | Image（resize PNG） | NPU1 | v7.0 (`8d1bbdc2`) | 归一化移至板上 input_processors |
-| `output_ddrnet23-slim-ptq-preprocess-npu3` | Image | NPU3 | v7.0 (`8d1bbdc2`) | **最终版本，上板验证用** |
-
-量化精度（`output_ddrnet23-slim-ptq-preprocess-npu3/quant/debug/precision_analysis_table.txt`）：
-Silu→U8、整网 U8；绝大部分中间层 Cosine > 0.97，末端输出层
-Cosine 0.99421 / MSE 0.05802。
-
-## 5. 上板精度（AX650A）
-
-- 模型：`output_ddrnet23-slim-ptq-preprocess-npu3/compiled.axmodel`
-  （axengine，`AxEngineExecutionProvider`）
-- 数据：Cityscapes val **全量 500 张**，输入 1x3x1024x2048；
-  GT 为 `*_gtFine_labelTrainIds.png`（ignore_index=255，19 类）
-- 结果：**mIoU 77.79 / aAcc 95.92**，参考 mIoU 77.84（**仅降 0.05**）
-- 速度：平均 **118.9 ms/帧**（500 张平均，meta.json）
-
-| 指标 | 值 |
-| --- | --- |
-| mIoU | 77.79 |
-| aAcc | 95.92 |
-| 参考 mIoU | 77.84（diff -0.05） |
-| 平均推理耗时 | 118.94 ms |
-
-逐类 IoU 见 `axera_pred-slim_vs_gt/metrics.csv`（节选：road 97.85 /
-building 92.44 / vegetation 92.20 / sky 94.83 / car 94.79；
-bicycle 76.17 / motorcycle 59.30 / pole 64.01）。
-
-结果文件：
-
-- `axera_pred-slim/meta.json` — 上板推理元数据（500 张、118.94 ms）
-- `axera_pred-slim/pred/<city>/*_pred.png` — 全量预测标签
-- `axera_pred-slim_vs_gt/{metrics.json, metrics.csv, confusion_matrix.csv}`
-  — 与 GT 对比的官方指标及混淆矩阵
-
-参照（本机 ONNX Runtime，CPU FP32，非部署路径）：slim 111.7 ms/帧、
-DDRNet-23 164.1 ms/帧（`onnx-vis/meta.json`）。
-
-## 6. 运行脚本
-
-| 脚本 | 作用 | 典型命令 |
-| --- | --- | --- |
-| `ddrnet_make_calib.py` | 生成校准集（bin / 图片，见第 3 节） | `python ddrnet_make_calib.py --input-size 1024 2048` |
-| `ddrnet_onnx_eval.py` | ONNX FP32 精度/可视化（CPU/CUDA） | `python ddrnet_onnx_eval.py --model onnx/ddrnet23_cityscapes-2048x1024.onnx` |
-| `ddrnet_axera_eval.py` | axmodel 上板评估（axengine） | `python ddrnet_axera_eval.py` |
-
-- `ddrnet_onnx_eval.py`：默认模型 `onnx/ddrnet23_cityscapes-2048x1024.onnx`，
-  默认只跑前 5 张（`--limit`），输出 `onnx-vis/`；给 `--gt-dir` 且存在
-  `gtFine` 时计算 mIoU/aAcc，全量评估用 `--limit 0`。
-- `ddrnet_axera_eval.py`：默认模型
-  `output_ddrnet23-slim-ptq-preprocess-npu3/compiled.axmodel`，默认全量
-  500 张，输出 `axera_pred-slim/`；输入为 **U8 NHWC**（脚本仅
-  resize + BGR→RGB，归一化由 axmodel 内嵌 input_processors 完成），
-  因此无需在本机安装 onnxruntime，改为 `import axengine`。
-- 环境依赖：`python3`、`opencv-python`、`numpy`；ONNX 评估另需
-  `onnxruntime`；上板评估需按 AXERA 工具链安装 `axengine`；模型转换需
-  Pulsar2 v7.0 运行环境（Docker）。
-
-## 7. 目录结构
-
-```
-DDRNet/
-├── README.md
-├── config/                                  # pulsar2 量化配置
-│   ├── config_siluInU8_ptq.json
-│   ├── config_siluInU8_ptq-preprocess.json
-│   └── config_siluInU16_ptq.json            # RTMDet 参考模板
-├── onnx/                                    # 待转换 ONNX（4 个尺寸/主干组合）
-├── ddrnet_make_calib.py                     # 校准集生成
-├── ddrnet_onnx_eval.py                      # ONNX FP32 评估
-├── ddrnet_axera_eval.py                     # compiled.axmodel 上板评估
-├── output_ddrnet23-slim-ptq/                # 转换产出（Binary 校准初版）
-├── output_ddrnet23-slim-ptq-preprocess/     # 转换产出（Image 校准）
-├── output_ddrnet23-slim-ptq-preprocess-npu3/# 转换产出（最终，上板使用）
-├── onnx-vis/                                # ONNX 评估输出（pred/vis/meta.json）
-├── axera_pred-slim/                         # 上板预测输出（pred/meta.json）
-└── axera_pred-slim_vs_gt/                   # 上板预测 vs GT（metrics.*/混淆矩阵）
-```
