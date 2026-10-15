@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 评估/对比输出（脚本生成）
+onnx-vis/
+axera_pred*/
+compare/
+runs/
+
+# 大体积产物（校准集 tar / bin、临时归档）
+*.tar
+*.bin
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

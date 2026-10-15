@@ -43,18 +43,14 @@ unzip -q gtFine_trainvaltest.zip && unzip -q leftImg8bit.zip
 
 - 数据源：Cityscapes val 500 张（frankfurt / lindau / munster），
   部署布局下位于 `../dataset/cityscapes/leftImg8bit/val`。
-- 工具：本包 `make_calib.py`（自含预处理，不依赖其他脚本，仅需
+- 工具：本包 `tools/make_calib.py`（自含预处理，不依赖其他脚本，仅需
   `opencv-python` + `numpy`），完成后自动归档为**扁平 tar**
   （条目 `./<stem>.png|bin`）。
 
 ```bash
 # Image 校准（当前 U8/U16 配置实际使用）：resize 至 1024x2048 的 PNG
-python make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
+python tools/make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
     --input-size 1024 2048 --save-images
-
-# 辅助模式：仅 resize 的 float32 bin（BGR，0-255，[1,3,1024,2048]）
-python make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
-    --input-size 1024 2048 --resize-only
 ```
 
 默认输出并归档到 `../dataset/cityscapes/ddrnet_calib_<H>x<W>[-resize]-img|bin`
@@ -64,14 +60,10 @@ python make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
 | 校准集（`../dataset/cityscapes/`） | 内容 | 用途 |
 | --- | --- | --- |
 | `ddrnet_calib_1024x2048-resize-img(.tar)` | 500 x PNG，仅 resize（BGR 0-255） | 当前 `config_u8/u16_ptq-preprocess.json`（Image 校准，归一化在板上完成） |
-| `ddrnet_calib_1024x2048-bin(.tar)` | 500 x float32 [1,3,1024,2048]，已归一化（RGB） | 早期 slim 初版（Binary 校准） |
-| `ddrnet_calib_1024x1024-bin(.tar)` | 500 x float32 [1,3,1024,1024]，已归一化 | 1024x1024 输入模型备用 |
-
-配置中 `calibration_size: 32`，即从 tar 中取前 32 张参与量化校准。
 
 ## 3. 模型转换
 
-工具链：Pulsar2 v7.0（Docker 内运行），目标平台 **AX650A**，NPU3 模式。
+工具链：[Pulsar2-modelScope](https://www.modelscope.cn/models/AXERA-TECH/Pulsar2/files) / [Pulsar2-HF](https://huggingface.co/AXERA-TECH/Pulsar2)，目标平台 **AX650A**，NPU3 模式。
 
 ```bash
 # 在 Pulsar2 环境中、以本包目录为工作目录执行
@@ -79,55 +71,21 @@ pulsar2 build --config config/config_u8_ptq-preprocess.json    # U8
 pulsar2 build --config config/config_u16_ptq-preprocess.json   # U16
 ```
 
-本包两个量化配置的差异仅在整网数据类型：
-
-| 配置项 | `config_u8_ptq-preprocess.json` | `config_u16_ptq-preprocess.json` |
-| --- | --- | --- |
-| input | `onnx/ddrnet23_cityscapes-2048x1024.onnx` | 同左 |
-| 整网数据类型 | U8 | U16 |
-| 校准数据 | `../dataset/cityscapes/ddrnet_calib_1024x2048-resize-img.tar`（Image，size 32） | 同左 |
-| 校准 mean/std | ImageNet RGB [123.675, 116.28, 103.53] / [58.395, 57.12, 57.375] | 同左 |
-| 输入端处理 | BGR/NHWC/U8 → RGB/NCHW + mean/std | 同左 |
-| conv bias / 精度分析 | FP32 / EndToEnd + NPUBackend | 同左 |
-| output_dir | `output_ddrnet23-ptq-preprocess-npu3` | `output_ddrnet23-ptq-u16-preprocess-npu3` |
-
-构建产出（每个 `output_*` 目录）：
-
-- `compiled.axmodel` — 部署产物（内嵌输入预处理，可直接送给 axengine）
-- `frontend/optimized.onnx` — 前端优化图
-- `quant/quant_axmodel.onnx`（+ `.data/.json`）— 量化图
-- `quant/debug/precision_analysis_table.txt` — 逐层量化精度表（Cosine/MSE），
-  如末端输出层 U16 版 Cosine 0.99985 / MSE 0.00129，
-  U8 版 0.98427 / 0.13061
-
-编译产物可按平台归档到 `axmodel/AX650/`、`axmodel/AX637/`。
-转换历史（输出目录位于项目根目录 `DDRNet/`）：
-
-| 输出目录 | 模型 / 校准 | npu_mode | 说明 |
-| --- | --- | --- | --- |
-| `output_ddrnet23-slim-ptq` | slim / Binary（预归一化 bin） | NPU1 | 初版，`compiler.check=2` |
-| `output_ddrnet23-slim-ptq-preprocess` | slim / Image | NPU1 | 归一化移至板上 `input_processors` |
-| `output_ddrnet23-slim-ptq-preprocess-npu3` | slim / Image | NPU3 | slim 最终版（精度见第 1 节） |
-| `output_ddrnet23-ptq-preprocess-npu3` | DDRNet-23 / Image | NPU3 | 对应 `config_u8_ptq-preprocess.json` |
-| `output_ddrnet23-ptq-u16-preprocess-npu3` | DDRNet-23 / Image | NPU3 | 对应 `config_u16_ptq-preprocess.json` |
-
 ## 4. 精度验证
 
-流程：GT 转换 → ONNX FP32 评估 → axmodel 评估（数据下载见第 2 节）。
+流程：GT 转换 → ONNX FP32 评估 → axmodel 评估 → 预测对比（数据下载见第 2 节）。
 
 1）GT 转换（labelIds → labelTrainIds）：镜像包不含
 `*_gtFine_labelTrainIds.png`，需转换后才能算官方指标：
 
 ```bash
-# 从 polygons 栅格化（边界像素更严格；需在 mmsegmentation 工程根目录执行，
-# 并 pip install cityscapesscripts）
-python tools/dataset_converters/cityscapes.py ../dataset/cityscapes --nproc 32
+# 从 polygons 栅格化（边界像素更严格；依赖 pip install cityscapesscripts mmengine）
+python tools/cityscapes.py ../dataset/cityscapes --nproc 32
 ```
 
 校验：`leftImg8bit/val` 500 张图，`gtFine/val` 500 个
 `*_gtFine_labelTrainIds.png`。评估时 `--img-dir` 指向图像目录
-（下载布局为 `leftImg8bit/val`，本机现有数据为 `val/`）、`--gt-dir` 指向
-`gtFine/val`。
+（下载布局为 `leftImg8bit/val`）、`--gt-dir` 指向`gtFine/val`。
 
 2）ONNX FP32 评估 `eval_onnx.py`（依赖 onnxruntime）：
 
@@ -159,6 +117,26 @@ python eval_axera.py \
   axmodel 内嵌 `input_processors` 自动完成，与量化的预处理保持一致。
 - 输出：`<out-dir>/pred/<city>/*_pred.png`、`meta.json`（含平均耗时），
   有 GT 时另有 `metrics.json/csv`。
+
+4）预测对比 `tools/compare.py`：将任意预测目录与 GT 复核，生成官方指标与
+混淆矩阵（可选误差可视化）。适用于无 GT 时先跑推理、后统一对比的场景。
+
+```bash
+# 复核 axmodel U16 预测（输出 compare/axera_pred-u16_vs_gt/）
+python tools/compare.py \
+    --pred-dir axera_pred-u16/pred \
+    --gt-dir ../dataset/cityscapes/gtFine/val \
+    --ref-miou 79.99
+
+# 可选：为前 5 对保存 (GT | 预测 | 误差) 三联图
+python tools/compare.py \
+    --pred-dir axera_pred-u16/pred \
+    --gt-dir ../dataset/cityscapes/gtFine/val \
+    --out-dir compare/axera_pred-u16_vs_gt --save-diff 5
+```
+
+- 输出：`metrics.json`、`metrics.csv`（逐类 IoU/Acc）、`confusion_matrix.csv`；
+  `--save-diff N` 时另有 `diff/<city>/*_diff.png`（绿=正确，红=错误）。
 
 指标为 19 类 IoU/Acc、mIoU、aAcc（ignore_index=255），与官方 Cityscapes
 评测口径一致。
