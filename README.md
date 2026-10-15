@@ -11,10 +11,12 @@ mIoU / aAcc。
 | 模型 | 精度模式 | mIoU | aAcc | ΔmIoU（量化 vs 浮点） | 平均推理耗时（ms） |
 | --- | --- | --- | --- | --- | --- |
 | DDRNet-23 | FP32 ONNX | 79.99 | 96.36 | / | / |
-| DDRNet-23 | [W8A8](./config/config_u8_ptq-preprocess.json) | 78.76 | 96.09 | -1.23 | / |
-| DDRNet-23 | [W8A16](./config/config_u16_ptq-preprocess.json) | 79.95 | 96.35 | -0.04 | / |
+| DDRNet-23 | [W8A8](./config/config_u8_ptq-preprocess.json) | 78.76 | 96.09 | -1.23 | 41.227 |
+| DDRNet-23 | [W8A16](./config/config_u16_ptq-preprocess.json) | 79.95 | 96.35 | -0.04 | 73.327 |
 | DDRNet-23-slim | FP32 ONNX | 77.97 | 95.98 | / | / |
-| DDRNet-23-slim | [W8A8](./config/config_u8_ptq-preprocess.json) | 77.79 | 95.92 | -0.18 | / |
+| DDRNet-23-slim | [W8A8](./config/config_u8_ptq-preprocess.json) | 77.79 | 95.92 | -0.18 | 18.381 |
+
+性能：AX650N NPU3 模式，采用 `ax_run_model -w 10 -r 100 -m <model>.axmodel` 测得。
 
 ## 2. 校准集准备
 
