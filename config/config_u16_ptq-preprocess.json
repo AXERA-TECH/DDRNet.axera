@@ -1,0 +1,46 @@
+{
+  "input": "onnx/ddrnet23_cityscapes-2048x1024.onnx",
+  "output_dir": "output_ddrnet23-ptq-u16-preprocess-npu3",
+  "model_type": "ONNX",
+  "target_hardware": "AX650",
+  "npu_mode": "NPU3",
+  "quant": {
+    "input_configs": [
+      {
+        "tensor_name": "DEFAULT",
+        "calibration_dataset": "../dataset/cityscapes/ddrnet_calib_1024x2048-resize-img.tar",
+        "calibration_size": 32,
+        "calibration_mean": [123.675, 116.28, 103.53],
+        "calibration_std": [58.395, 57.12, 57.375],
+        "calibration_format": "Image"
+      }
+    ],
+    "layer_configs": [
+      {       
+        "start_tensor_names": ["DEFAULT"],
+        "end_tensor_names": ["DEFAULT"],
+        "data_type": "U16"
+      }
+    ],
+    "conv_bias_data_type": "FP32",
+    "precision_analysis": true,
+    "precision_analysis_method": "EndToEnd",
+    "precision_analysis_mode": "NPUBackend"
+  },
+  "input_processors": [
+    {
+      "tensor_name": "DEFAULT",
+      "tensor_format": "RGB",
+      "tensor_layout": "NCHW",
+      "src_format": "BGR",
+      "src_layout": "NHWC",
+      "src_dtype": "U8",
+      "mean": [123.675, 116.28, 103.53],
+      "std": [58.395, 57.12, 57.375]
+    }
+  ],
+  "output_processors": [],
+  "compiler": {
+    "check": 0
+  }
+}
