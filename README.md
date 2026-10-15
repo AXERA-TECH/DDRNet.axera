@@ -1,4 +1,4 @@
-# DDRNet Cityscapes 语义分割 — AX650 量化部署
+# DDRNet Cityscapes 语义分割
 
 将 DDRNet（DDRNet-23 / DDRNet-23-slim，Cityscapes 19 类）从 ONNX 经
 Pulsar2 量化编译为 `compiled.axmodel`，并在 AX650A 上完成全量 val 精度验证。
@@ -131,7 +131,7 @@ python eval_onnx.py \
     --limit 0 --device cpu
 ```
 
-3）axmodel 评估 `eval_axera.py`（依赖 axengine，`AxEngineExecutionProvider`）：
+3）axmodel 评估 `eval_axera.py`（依赖 [axengine](https://github.com/AXERA-TECH/pyaxengine)，`AxEngineExecutionProvider`）：
 
 ```bash
 # 默认：U16 量化模型，全量 500 张，输出 axera_pred-u16/
