@@ -63,6 +63,35 @@ python tools/make_calib.py --img-dir ../dataset/cityscapes/leftImg8bit/val \
 
 ## 3. 模型转换
 
+1）ONNX 导出（可选）`tools/export_onnx.py`：使用 OpenMMLab 官方
+Cityscapes 权重导出定 shape ONNX；权重自动下载到 `weights/`、模型输出到
+`runs/`，完成后自动用示例图与 PyTorch 校验数值（`--skip-verify` 跳过）。
+
+- 需 [mmsegmentation](https://github.com/open-mmlab/mmsegmentation) 导出环境（torch/mmcv/mmengine/mmseg + onnxruntime，
+  如 `torch2.1`）；脚本需置于 mmsegmentation 工程的 `tools/deployment/`
+  下运行（脚本按该位置定位工程根目录，读取 `configs/ddrnet/`、`demo/`，
+  写入 `weights/`、`runs/`）。
+- 输入约定与本包 `onnx/` 一致：FP32 RGB NCHW 固定 shape、已归一化
+  （`(x-mean)/std`，图内不含归一化节点），输出 `(1, 19, H, W)`。
+
+```bash
+# 在 mmsegmentation 工程根目录执行（脚本置于 tools/deployment/）
+# 官方评测分辨率：H=1024, W=2048
+python tools/deployment/export_onnx.py --input-size 1024 2048
+
+# 可选参数：--models（默认导出 ddrnet23、ddrnet23-slim 两个）、
+# --opset 11、--device cuda、--skip-verify
+python tools/deployment/export_onnx.py --input-size 1024 2048 \
+    --models ddrnet23-slim --device cpu
+```
+
+- 导出文件名为 `<name>_cityscapes-<W>x<H>.onnx`
+  （如 `ddrnet23_cityscapes-2048x1024.onnx`），可直接替换本包 `onnx/`
+  下同名模型后执行量化编译。默认导出 1024x1024，评测/部署用
+  `--input-size 1024 2048`。
+
+2）Pulsar2 量化编译：
+
 工具链：[Pulsar2-modelScope](https://www.modelscope.cn/models/AXERA-TECH/Pulsar2/files) / [Pulsar2-HF](https://huggingface.co/AXERA-TECH/Pulsar2)，目标平台 **AX650A**，NPU3 模式。
 
 ```bash
@@ -143,11 +172,7 @@ python tools/compare.py \
 
 ## 5. 参考项目
 
-- **DDRNet**（TPAMI 2023）: *Deep Dual-Resolution Networks for Real-Time
-  and Accurate Semantic Segmentation of Traffic Scenes*
-  - 官方实现: <https://github.com/ydhongHIT/DDRNet>
 - **MMSegmentation**（OpenMMLab）: DDRNet Cityscapes 训练配置与权重
- （模型由此工程导出，导出脚本不在本目录）
   - <https://github.com/open-mmlab/mmsegmentation>（`configs/ddrnet`）
 - **AXERA Pulsar2** v7.0 量化编译工具链 + **axengine** 运行时（AX650A）
   - <https://pulsar2-docs.readthedocs.io/en/latest/pulsar2/introduction.html>
